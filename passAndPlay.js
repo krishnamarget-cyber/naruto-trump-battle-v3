@@ -63,13 +63,13 @@ let lastAppliedOnlineTurn = 0;
 // ---------------------------------------------------------------------------
 function snapshotMatchState() {
   const { history, preset, ...rest } = matchState;
-  return { ...JSON.parse(JSON.stringify(rest)), presetKey: preset.key };
+  return { ...JSON.parse(JSON.stringify(rest)), explorationMode: getActiveExplorationMode(), presetKey: preset.key };
 }
 
 function restoreMatchState(snap) {
   const { presetKey, ...rest } = snap;
   if (!MATCH_PRESETS[presetKey]) throw new Error(`Unknown preset in saved match: ${presetKey}`);
-  return { ...rest, preset: MATCH_PRESETS[presetKey], history: [] };
+  return { ...rest, explorationMode: rest.explorationMode || snap.explorationMode || getActiveExplorationMode(), preset: MATCH_PRESETS[presetKey], history: [] };
 }
 
 function persistOnlineState() {
@@ -414,6 +414,7 @@ roomClient.on("message", (msg) => {
     $("roomLobbyInfo").innerHTML =
       `Connected to Host <strong>${msg.hostName || "Player 1"}</strong>! Waiting for draft...`;
   } else if (msg.type === "TEAM_DRAFT_SYNC" && roomClient.role === "GUEST") {
+    selectedExplorationMode = msg.explorationMode || "default";
     draftedTeams = {
       presetKey: msg.presetKey,
       nameA: msg.nameA,
@@ -436,7 +437,10 @@ roomClient.on("message", (msg) => {
       startOnlineMatchAsHost();
     }
   } else if (msg.type === "START_ONLINE_MATCH" && roomClient.role === "GUEST") {
-    matchState = createMatchState({ intenseMode: ($("poolFilterSelect")?.value || "default") === "intense", presetKey: msg.presetKey,
+    if (msg.explorationMode) selectedExplorationMode = msg.explorationMode;
+    matchState = createMatchState({
+      presetKey: msg.presetKey,
+      explorationMode: selectedExplorationMode,
       teamA: msg.teamA,
       teamB: msg.teamB,
     });
@@ -467,11 +471,13 @@ roomClient.on("message", (msg) => {
     matchState.players.A.extraArmorHp = msg.stateAfter.players.A.extraArmorHp;
     matchState.players.A.shields = msg.stateAfter.players.A.shields;
     matchState.players.A.usedCardIds = msg.stateAfter.players.A.usedCardIds;
+    matchState.players.A.usedCombatStyles = msg.stateAfter.players.A.usedCombatStyles || [];
     matchState.players.A.basicStatHistory = msg.stateAfter.players.A.basicStatHistory || [];
     matchState.players.B.hp = msg.stateAfter.players.B.hp;
     matchState.players.B.extraArmorHp = msg.stateAfter.players.B.extraArmorHp;
     matchState.players.B.shields = msg.stateAfter.players.B.shields;
     matchState.players.B.usedCardIds = msg.stateAfter.players.B.usedCardIds;
+    matchState.players.B.usedCombatStyles = msg.stateAfter.players.B.usedCombatStyles || [];
     matchState.players.B.basicStatHistory = msg.stateAfter.players.B.basicStatHistory || [];
     matchState.history.push(rec);
 
@@ -506,9 +512,11 @@ function startDraft() {
   const preset = $("presetSelect").value;
   const mode = $("metaSelect").value;
   const filterMode = $("poolFilterSelect")?.value || "default";
+  selectedExplorationMode = filterMode;
+  const passFilterMode = filterMode === "intense" ? "intense" : "default";
   const seed = $("seedInput").value.trim() || (isOnline() ? `room-${roomClient.roomCode || Date.now()}` : "");
 
-  const poolResult = buildPool(db, { preset, mode, filterMode, seed });
+  const poolResult = buildPool(db, { preset, mode, filterMode: passFilterMode, seed });
   const { A, B } = allocateTeams(poolResult);
   const defaultBName = isVsComputer() ? `Computer (${aiDifficulty === "hard" ? "Hard" : "Medium 80%"})` : "Player 2";
   draftedTeams = {
@@ -655,7 +663,7 @@ function startOnlineMatchAsHost() {
     viceCaptainId: tempVcB,
   };
 
-  matchState = createMatchState({ intenseMode: ($("poolFilterSelect")?.value || "default") === "intense", presetKey: draftedTeams.presetKey,
+  matchState = createMatchState({ presetKey: draftedTeams.presetKey, explorationMode: selectedExplorationMode,
     teamA: teamADef,
     teamB: teamBDef,
   });
@@ -663,6 +671,7 @@ function startOnlineMatchAsHost() {
   roomClient.send({
     type: "START_ONLINE_MATCH",
     presetKey: draftedTeams.presetKey,
+    explorationMode: selectedExplorationMode,
     teamA: teamADef,
     teamB: teamBDef,
   });
@@ -708,7 +717,7 @@ function confirmLeaders() {
     const aiLeaders = chooseComputerLeaders(draftedTeams.cardsB, aiDifficulty, tierAverages);
     tempCapB = aiLeaders.captainId;
     tempVcB = aiLeaders.viceCaptainId;
-    matchState = createMatchState({ intenseMode: ($("poolFilterSelect")?.value || "default") === "intense", presetKey: draftedTeams.presetKey,
+    matchState = createMatchState({ presetKey: draftedTeams.presetKey, explorationMode: selectedExplorationMode,
       teamA: {
         name: draftedTeams.nameA,
         cards: draftedTeams.cardsA,
@@ -735,7 +744,7 @@ function confirmLeaders() {
     openLeaderCurtain("B");
     return;
   }
-  matchState = createMatchState({ intenseMode: ($("poolFilterSelect")?.value || "default") === "intense", presetKey: draftedTeams.presetKey,
+  matchState = createMatchState({ presetKey: draftedTeams.presetKey, explorationMode: selectedExplorationMode,
     teamA: {
       name: draftedTeams.nameA,
       cards: draftedTeams.cardsA,
@@ -784,37 +793,180 @@ function renderTierStepper() {
 }
 
 
-function isIntenseStyleMode() {
-  return Boolean(matchState && matchState.intenseMode);
+const ALL_COMBAT_STYLES = ["tai", "nin", "gen", "kun", "special"];
+let selectedExplorationMode = "default"; // "default" | "intense" | "intense_v2" | "intense_v3"
+
+function getActiveExplorationMode() {
+  return matchState?.explorationMode || selectedExplorationMode || "default";
 }
 
-function getIntenseStyleProgress(player) {
+function getIntenseV1Progress(player) {
   const styles = Array.isArray(player?.usedCombatStyles) ? player.usedCombatStyles : [];
   const blockLen = 5;
   const startIdx = Math.floor(styles.length / blockLen) * blockLen;
-  const blockStyles = [...new Set(styles.slice(startIdx))];
-  const remInBlock = blockLen - styles.slice(startIdx).length;
+  const curBlock = styles.slice(startIdx);
+  const blockStyles = [...new Set(curBlock)];
+  const remInBlock = Math.max(1, blockLen - curBlock.length);
   const needBlock = Math.max(0, 3 - blockStyles.length);
+  const mustPickNewInBlock = needBlock > 0 && remInBlock <= needBlock;
 
   const matchStyles = [...new Set(styles)];
-  const totalCards = player?.roster?.length || 15;
-  const remCards = Math.max(0, totalCards - (player?.usedCardIds?.length || 0));
+  const totalCards = Array.isArray(player?.roster) ? player.roster.length : 15;
+  const usedCount = Array.isArray(player?.usedCardIds) ? player.usedCardIds.length : 0;
+  const remCards = Math.max(1, totalCards - usedCount);
   const needMatch = Math.max(0, 4 - matchStyles.length);
+  const mustPickNewForMatch = needMatch > 0 && remCards <= needMatch;
 
   return {
     blockStyles,
-    mustPickNewInBlock: remInBlock <= needBlock && needBlock > 0,
+    mustPickNewInBlock,
     matchStyles,
-    mustPickNewInMatch: remCards <= needMatch && needMatch > 0,
+    mustPickNewForMatch,
   };
 }
 
+function getIntenseV2Progress(player) {
+  const styles = Array.isArray(player?.usedCombatStyles) ? player.usedCombatStyles : [];
+  const totalRounds = Array.isArray(player?.roster) ? player.roster.length : 15;
+  const fullBlocksCount = Math.floor(totalRounds / 6);
+  const fullBlockRoundsLimit = fullBlocksCount * 6;
+  const currentTurnNumber = styles.length + 1;
+
+  let mustPickNewInSixBlock = false;
+  let blockStyles = [];
+  if (currentTurnNumber <= fullBlockRoundsLimit) {
+    const blockIdx = Math.floor(styles.length / 6);
+    const startIdx = blockIdx * 6;
+    const curBlock = styles.slice(startIdx);
+    blockStyles = [...new Set(curBlock)];
+    const remInSixBlock = Math.max(1, 6 - curBlock.length);
+    const needFourInBlock = Math.max(0, 4 - blockStyles.length);
+    mustPickNewInSixBlock = needFourInBlock > 0 && remInSixBlock <= needFourInBlock;
+  }
+
+  const matchStyles = [...new Set(styles)];
+  const usedCount = Array.isArray(player?.usedCardIds) ? player.usedCardIds.length : 0;
+  const remCards = Math.max(1, totalRounds - usedCount);
+  const needAllFive = Math.max(0, ALL_COMBAT_STYLES.length - matchStyles.length);
+  const mustPickNewForAllFive = needAllFive > 0 && remCards <= needAllFive;
+
+  return {
+    blockStyles,
+    mustPickNewInSixBlock,
+    matchStyles,
+    mustPickNewForAllFive,
+  };
+}
+
+function getIntenseV3Progress(player) {
+  const styles = Array.isArray(player?.usedCombatStyles) ? player.usedCombatStyles : [];
+  const blockLen = 5;
+  const startIdx = Math.floor(styles.length / blockLen) * blockLen;
+  const curBlock = styles.slice(startIdx);
+  const blockStyles = [...new Set(curBlock)];
+  const remInBlock = Math.max(1, blockLen - curBlock.length);
+  const needFourInBlock = Math.max(0, 4 - blockStyles.length);
+  const mustPickNewInFiveBlock = needFourInBlock > 0 && remInBlock <= needFourInBlock;
+
+  const matchStyles = [...new Set(styles)];
+  const totalCards = Array.isArray(player?.roster) ? player.roster.length : 15;
+  const usedCount = Array.isArray(player?.usedCardIds) ? player.usedCardIds.length : 0;
+  const remCards = Math.max(1, totalCards - usedCount);
+  const needAllFive = Math.max(0, ALL_COMBAT_STYLES.length - matchStyles.length);
+  const mustPickNewForAllFive = needAllFive > 0 && remCards <= needAllFive;
+
+  return {
+    blockStartTurn: startIdx + 1,
+    blockEndTurn: startIdx + blockLen,
+    blockStyles,
+    mustPickNewInFiveBlock,
+    matchStyles,
+    mustPickNewForAllFive,
+  };
+}
+
+function evaluateCombatStyleChoice(player, styleKey) {
+  const mode = getActiveExplorationMode();
+  if (mode === "default" || !player) {
+    return { allowed: true, reason: "" };
+  }
+  if (mode === "intense") {
+    const p = getIntenseV1Progress(player);
+    if (p.mustPickNewInBlock && !p.blockStyles.includes(styleKey)) {
+      return {
+        allowed: false,
+        reason: `Intense Mode: explore at least 3 distinct styles every 5 rounds (${p.blockStyles.length}/3 in current block).`,
+      };
+    }
+    if (p.mustPickNewForMatch && !p.matchStyles.includes(styleKey)) {
+      return {
+        allowed: false,
+        reason: `Intense Mode: explore at least 4 distinct styles across the match (${p.matchStyles.length}/4 explored).`,
+      };
+    }
+    return { allowed: true, reason: "" };
+  }
+  if (mode === "intense_v2") {
+    const p2 = getIntenseV2Progress(player);
+    if (p2.mustPickNewInSixBlock && !p2.blockStyles.includes(styleKey)) {
+      return {
+        allowed: false,
+        reason: `Intense V2 Mode: explore at least 4 distinct styles in each full 6-round block (${p2.blockStyles.length}/4 explored).`,
+      };
+    }
+    if (p2.mustPickNewForAllFive && !p2.matchStyles.includes(styleKey)) {
+      return {
+        allowed: false,
+        reason: `Intense V2 Mode: all 5 combat styles must be explored in the match (${p2.matchStyles.length}/5 explored).`,
+      };
+    }
+    return { allowed: true, reason: "" };
+  }
+  if (mode === "intense_v3") {
+    const p3 = getIntenseV3Progress(player);
+    if (p3.mustPickNewInFiveBlock && !p3.blockStyles.includes(styleKey)) {
+      return {
+        allowed: false,
+        reason: `Intense V3 Mode: explore at least 4 distinct combat styles within every 5 rounds (${p3.blockStyles.length}/4 in Rounds ${p3.blockStartTurn}–${p3.blockEndTurn}).`,
+      };
+    }
+    if (p3.mustPickNewForAllFive && !p3.matchStyles.includes(styleKey)) {
+      return {
+        allowed: false,
+        reason: `Intense V3 Mode: must explore all 5 combat styles by the end of the match (${p3.matchStyles.length}/5 explored).`,
+      };
+    }
+    return { allowed: true, reason: "" };
+  }
+  return { allowed: true, reason: "" };
+}
+
 function isCombatStyleAllowed(player, styleKey) {
-  if (!isIntenseStyleMode() || !player) return true;
-  const p = getIntenseStyleProgress(player);
-  if (p.mustPickNewInBlock && !p.blockStyles.includes(styleKey)) return false;
-  if (p.mustPickNewInMatch && !p.matchStyles.includes(styleKey)) return false;
-  return true;
+  return evaluateCombatStyleChoice(player, styleKey).allowed;
+}
+
+function syncStyleButtonsForPlayer(player) {
+  const btns = $("styleBtnGroup").querySelectorAll("button");
+  const mode = getActiveExplorationMode();
+  if (mode === "default" || !player) {
+    btns.forEach((b) => {
+      b.disabled = false;
+      b.title = "";
+    });
+    return;
+  }
+  let firstAllowed = null;
+  btns.forEach((btn) => {
+    const st = btn.dataset.style;
+    const res = evaluateCombatStyleChoice(player, st);
+    btn.disabled = !res.allowed;
+    btn.title = res.reason || "";
+    if (res.allowed && !firstAllowed) firstAllowed = st;
+  });
+  if (!isCombatStyleAllowed(player, selectedStyle) && firstAllowed) {
+    selectedStyle = firstAllowed;
+    btns.forEach((b) => b.classList.toggle("active", b.dataset.style === selectedStyle));
+  }
 }
 
 function renderMyRosterStatus() {
@@ -1008,12 +1160,9 @@ function refreshMoveSelectorLabels(card) {
   const tier = card ? getCardTier(card) : null;
 
   const activeP = matchState ? matchState.players[mySide()] : null;
-  let firstEnabledStyle = null;
+  syncStyleButtonsForPlayer(activeP);
   $("styleBtnGroup").querySelectorAll("button").forEach((btn) => {
     const st = btn.dataset.style;
-    const allowed = isCombatStyleAllowed(activeP, st);
-    btn.disabled = !allowed;
-    if (allowed && !firstEnabledStyle) firstEnabledStyle = st;
     if (!card) {
       btn.innerHTML = `<span>${STYLE_LABELS[st]}</span>`;
       return;
@@ -1022,12 +1171,6 @@ function refreshMoveSelectorLabels(card) {
     const defHtml = formatStatSignal(card[`${st}_def`], tier, `${st}_def`);
     btn.innerHTML = `<span>${STYLE_LABELS[st]}</span><span class="btn-stat-sub">ATK ${atkHtml} · DEF ${defHtml}</span>`;
   });
-  if (matchState?.intenseMode && activeP && !isCombatStyleAllowed(activeP, selectedStyle) && firstEnabledStyle) {
-    selectedStyle = firstEnabledStyle;
-    $("styleBtnGroup").querySelectorAll("button").forEach((b) => {
-      b.classList.toggle("active", b.dataset.style === selectedStyle);
-    });
-  }
 
   $("basicStatBtnGroup").querySelectorAll("button").forEach((btn) => {
     const st = btn.dataset.stat;
@@ -1083,6 +1226,7 @@ function revealActiveHand() {
   refreshMoveSelectorLabels(null);
   $("btnLockMove").disabled = true;
   $("btnLockMove").textContent = "Select a Card Above to Lock Move";
+  syncStyleButtonsForPlayer(player);
 
   updateFiveRoundStatButtons(player);
   $("activeTierPrompt").textContent = `${player.name} — Tap 1 available Tier ${activeTier} card: (${getFiveRoundStatProgress(player).distinctCount}/3 basic stats in Rounds ${getFiveRoundStatProgress(player).blockStartTurn}–${getFiveRoundStatProgress(player).blockEndTurn})`;
@@ -1488,6 +1632,13 @@ function runAnimatedBattleSimulation(record) {
 
 function handleLockMove() {
   if (!selectedCardId) return;
+  const curPlayer = matchState?.players?.[mySide()];
+  const styleCheck = evaluateCombatStyleChoice(curPlayer, selectedStyle);
+  if (!styleCheck.allowed) {
+    alert(styleCheck.reason);
+    syncStyleButtonsForPlayer(curPlayer);
+    return;
+  }
 
   const chosenMove = {
     cardId: selectedCardId,
@@ -1700,6 +1851,7 @@ $("styleBtnGroup").querySelectorAll("button").forEach((btn) => {
   btn.onclick = () => {
     $("styleBtnGroup").querySelectorAll("button").forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
+    if (btn.disabled) return;
     selectedStyle = btn.dataset.style;
     if (matchState) updateSelectedPreviewBar(matchState.players[mySide()]);
   };

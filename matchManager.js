@@ -88,9 +88,9 @@ export function getFiveRoundStatProgress(player) {
     if (counts[st] !== undefined) counts[st] += 1;
   }
   const roundsUsedInBlock = blockStats.length;
-  const roundsRemainingInBlock = 5 - roundsUsedInBlock;
+  const roundsRemainingInBlock = Math.max(1, 5 - roundsUsedInBlock);
   const neededDistinct = Math.max(0, FIVE_ROUND_MIN_DISTINCT_STATS - distinctSet.size);
-  const mustPickNewStatNow = roundsRemainingInBlock === 1 && neededDistinct >= 1;
+  const mustPickNewStatNow = neededDistinct > 0 && roundsRemainingInBlock <= neededDistinct;
 
   return {
     blockNumber: Math.floor(blockStart / 5) + 1,
@@ -165,7 +165,7 @@ export function getActiveProgressionTier(matchState) {
   return null;
 }
 
-export function createMatchState({ presetKey = "standard", teamA, teamB }) {
+export function createMatchState({ presetKey = "standard", explorationMode = "default", teamA, teamB }) {
   const preset = MATCH_PRESETS[presetKey];
   if (!preset) {
     throw new CardDatabaseError(`Unknown presetKey: ${JSON.stringify(presetKey)}.`);
@@ -180,6 +180,8 @@ export function createMatchState({ presetKey = "standard", teamA, teamB }) {
 
   const state = {
     preset,
+    explorationMode: explorationMode || "default",
+    intenseMode: explorationMode === "intense",
     turn: 1,
     activeTier: "L1",
     status: "IN_PROGRESS",
@@ -414,4 +416,94 @@ export function executeSimultaneousClash(matchState, {
   }
 
   return record;
+}
+
+
+export const ALL_COMBAT_STYLES = ["tai", "nin", "gen", "kun", "special"];
+
+export function getStyleExplorationStatus(player, styleKey, explorationMode = "default") {
+  if (!explorationMode || explorationMode === "default" || !player) {
+    return { allowed: true, reason: "" };
+  }
+
+  const styles = Array.isArray(player.usedCombatStyles) ? player.usedCombatStyles : [];
+  const totalRounds = Array.isArray(player.roster) ? player.roster.length : 15;
+  const usedCards = Array.isArray(player.usedCardIds) ? player.usedCardIds.length : 0;
+  const remCards = Math.max(1, totalRounds - usedCards);
+
+  const matchStyles = [...new Set(styles)];
+  const needAllFive = Math.max(0, ALL_COMBAT_STYLES.length - matchStyles.length);
+  const mustPickUnexploredMatchStyle = needAllFive > 0 && remCards <= needAllFive;
+
+  if (explorationMode === "intense") {
+    const startIdx = Math.floor(styles.length / 5) * 5;
+    const blockStyles = [...new Set(styles.slice(startIdx))];
+    const remInFive = Math.max(1, 5 - (styles.length - startIdx));
+    const needThree = Math.max(0, 3 - blockStyles.length);
+    if (needThree > 0 && remInFive <= needThree && blockStyles.includes(styleKey)) {
+      return {
+        allowed: false,
+        reason: `Intense Mode: explore at least 3 distinct combat styles every 5 rounds (${blockStyles.length}/3 in current 5-round block).`,
+      };
+    }
+    const needFour = Math.max(0, 4 - matchStyles.length);
+    if (needFour > 0 && remCards <= needFour && matchStyles.includes(styleKey)) {
+      return {
+        allowed: false,
+        reason: `Intense Mode: explore at least 4 distinct combat styles across the match (${matchStyles.length}/4 explored).`,
+      };
+    }
+    return { allowed: true, reason: "" };
+  }
+
+  if (explorationMode === "intense_v2") {
+    const fullBlocksCount = Math.floor(totalRounds / 6);
+    const fullBlockTurnsLimit = fullBlocksCount * 6;
+    const currentTurnNumber = styles.length + 1;
+
+    if (currentTurnNumber <= fullBlockTurnsLimit) {
+      const blockIdx = Math.floor(styles.length / 6);
+      const startIdx = blockIdx * 6;
+      const blockStyles = [...new Set(styles.slice(startIdx))];
+      const remInSix = Math.max(1, 6 - (styles.length - startIdx));
+      const needFourInSix = Math.max(0, 4 - blockStyles.length);
+      if (needFourInSix > 0 && remInSix <= needFourInSix && blockStyles.includes(styleKey)) {
+        return {
+          allowed: false,
+          reason: `Intense V2 Mode: explore at least 4 distinct combat styles in each full 6-round block (${blockStyles.length}/4 explored in current 6-round block).`,
+        };
+      }
+    }
+
+    if (mustPickUnexploredMatchStyle && matchStyles.includes(styleKey)) {
+      return {
+        allowed: false,
+        reason: `Intense V2 Mode: must explore all 5 combat styles by the end of the match (${matchStyles.length}/5 explored).`,
+      };
+    }
+    return { allowed: true, reason: "" };
+  }
+
+  if (explorationMode === "intense_v3") {
+    const startIdx = Math.floor(styles.length / 5) * 5;
+    const blockStyles = [...new Set(styles.slice(startIdx))];
+    const remInFive = Math.max(1, 5 - (styles.length - startIdx));
+    const needFourInFive = Math.max(0, 4 - blockStyles.length);
+    if (needFourInFive > 0 && remInFive <= needFourInFive && blockStyles.includes(styleKey)) {
+      return {
+        allowed: false,
+        reason: `Intense V3 Mode: explore at least 4 distinct combat styles within every 5 rounds (${blockStyles.length}/4 explored in current 5-round block).`,
+      };
+    }
+
+    if (mustPickUnexploredMatchStyle && matchStyles.includes(styleKey)) {
+      return {
+        allowed: false,
+        reason: `Intense V3 Mode: must explore all 5 combat styles by the end of the match (${matchStyles.length}/5 explored).`,
+      };
+    }
+    return { allowed: true, reason: "" };
+  }
+
+  return { allowed: true, reason: "" };
 }

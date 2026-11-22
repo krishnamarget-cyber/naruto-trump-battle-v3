@@ -12,6 +12,7 @@ import {
   isBasicStatAllowedInFiveRounds,
   FIVE_ROUND_MIN_DISTINCT_STATS,
   FIVE_ROUND_MAX_SAME_STAT,
+  getStyleExplorationStatus,
 } from "./matchManager.js";
 import { buildPool, allocateTeams } from "./teamSelection.js";
 import { buildCardPortraitDataUrl } from "./portraitGenerator.js";
@@ -793,152 +794,14 @@ function renderTierStepper() {
 }
 
 
-const ALL_COMBAT_STYLES = ["tai", "nin", "gen", "kun", "special"];
-let selectedExplorationMode = "default"; // "default" | "intense" | "intense_v2" | "intense_v3"
+let selectedExplorationMode = "default";
 
 function getActiveExplorationMode() {
   return matchState?.explorationMode || selectedExplorationMode || "default";
 }
 
-function getIntenseV1Progress(player) {
-  const styles = Array.isArray(player?.usedCombatStyles) ? player.usedCombatStyles : [];
-  const blockLen = 5;
-  const startIdx = Math.floor(styles.length / blockLen) * blockLen;
-  const curBlock = styles.slice(startIdx);
-  const blockStyles = [...new Set(curBlock)];
-  const remInBlock = Math.max(1, blockLen - curBlock.length);
-  const needBlock = Math.max(0, 3 - blockStyles.length);
-  const mustPickNewInBlock = needBlock > 0 && remInBlock <= needBlock;
-
-  const matchStyles = [...new Set(styles)];
-  const totalCards = Array.isArray(player?.roster) ? player.roster.length : 15;
-  const usedCount = Array.isArray(player?.usedCardIds) ? player.usedCardIds.length : 0;
-  const remCards = Math.max(1, totalCards - usedCount);
-  const needMatch = Math.max(0, 4 - matchStyles.length);
-  const mustPickNewForMatch = needMatch > 0 && remCards <= needMatch;
-
-  return {
-    blockStyles,
-    mustPickNewInBlock,
-    matchStyles,
-    mustPickNewForMatch,
-  };
-}
-
-function getIntenseV2Progress(player) {
-  const styles = Array.isArray(player?.usedCombatStyles) ? player.usedCombatStyles : [];
-  const totalRounds = Array.isArray(player?.roster) ? player.roster.length : 15;
-  const fullBlocksCount = Math.floor(totalRounds / 6);
-  const fullBlockRoundsLimit = fullBlocksCount * 6;
-  const currentTurnNumber = styles.length + 1;
-
-  let mustPickNewInSixBlock = false;
-  let blockStyles = [];
-  if (currentTurnNumber <= fullBlockRoundsLimit) {
-    const blockIdx = Math.floor(styles.length / 6);
-    const startIdx = blockIdx * 6;
-    const curBlock = styles.slice(startIdx);
-    blockStyles = [...new Set(curBlock)];
-    const remInSixBlock = Math.max(1, 6 - curBlock.length);
-    const needFourInBlock = Math.max(0, 4 - blockStyles.length);
-    mustPickNewInSixBlock = needFourInBlock > 0 && remInSixBlock <= needFourInBlock;
-  }
-
-  const matchStyles = [...new Set(styles)];
-  const usedCount = Array.isArray(player?.usedCardIds) ? player.usedCardIds.length : 0;
-  const remCards = Math.max(1, totalRounds - usedCount);
-  const needAllFive = Math.max(0, ALL_COMBAT_STYLES.length - matchStyles.length);
-  const mustPickNewForAllFive = needAllFive > 0 && remCards <= needAllFive;
-
-  return {
-    blockStyles,
-    mustPickNewInSixBlock,
-    matchStyles,
-    mustPickNewForAllFive,
-  };
-}
-
-function getIntenseV3Progress(player) {
-  const styles = Array.isArray(player?.usedCombatStyles) ? player.usedCombatStyles : [];
-  const blockLen = 5;
-  const startIdx = Math.floor(styles.length / blockLen) * blockLen;
-  const curBlock = styles.slice(startIdx);
-  const blockStyles = [...new Set(curBlock)];
-  const remInBlock = Math.max(1, blockLen - curBlock.length);
-  const needFourInBlock = Math.max(0, 4 - blockStyles.length);
-  const mustPickNewInFiveBlock = needFourInBlock > 0 && remInBlock <= needFourInBlock;
-
-  const matchStyles = [...new Set(styles)];
-  const totalCards = Array.isArray(player?.roster) ? player.roster.length : 15;
-  const usedCount = Array.isArray(player?.usedCardIds) ? player.usedCardIds.length : 0;
-  const remCards = Math.max(1, totalCards - usedCount);
-  const needAllFive = Math.max(0, ALL_COMBAT_STYLES.length - matchStyles.length);
-  const mustPickNewForAllFive = needAllFive > 0 && remCards <= needAllFive;
-
-  return {
-    blockStartTurn: startIdx + 1,
-    blockEndTurn: startIdx + blockLen,
-    blockStyles,
-    mustPickNewInFiveBlock,
-    matchStyles,
-    mustPickNewForAllFive,
-  };
-}
-
 function evaluateCombatStyleChoice(player, styleKey) {
-  const mode = getActiveExplorationMode();
-  if (mode === "default" || !player) {
-    return { allowed: true, reason: "" };
-  }
-  if (mode === "intense") {
-    const p = getIntenseV1Progress(player);
-    if (p.mustPickNewInBlock && !p.blockStyles.includes(styleKey)) {
-      return {
-        allowed: false,
-        reason: `Intense Mode: explore at least 3 distinct styles every 5 rounds (${p.blockStyles.length}/3 in current block).`,
-      };
-    }
-    if (p.mustPickNewForMatch && !p.matchStyles.includes(styleKey)) {
-      return {
-        allowed: false,
-        reason: `Intense Mode: explore at least 4 distinct styles across the match (${p.matchStyles.length}/4 explored).`,
-      };
-    }
-    return { allowed: true, reason: "" };
-  }
-  if (mode === "intense_v2") {
-    const p2 = getIntenseV2Progress(player);
-    if (p2.mustPickNewInSixBlock && !p2.blockStyles.includes(styleKey)) {
-      return {
-        allowed: false,
-        reason: `Intense V2 Mode: explore at least 4 distinct styles in each full 6-round block (${p2.blockStyles.length}/4 explored).`,
-      };
-    }
-    if (p2.mustPickNewForAllFive && !p2.matchStyles.includes(styleKey)) {
-      return {
-        allowed: false,
-        reason: `Intense V2 Mode: all 5 combat styles must be explored in the match (${p2.matchStyles.length}/5 explored).`,
-      };
-    }
-    return { allowed: true, reason: "" };
-  }
-  if (mode === "intense_v3") {
-    const p3 = getIntenseV3Progress(player);
-    if (p3.mustPickNewInFiveBlock && !p3.blockStyles.includes(styleKey)) {
-      return {
-        allowed: false,
-        reason: `Intense V3 Mode: explore at least 4 distinct combat styles within every 5 rounds (${p3.blockStyles.length}/4 in Rounds ${p3.blockStartTurn}–${p3.blockEndTurn}).`,
-      };
-    }
-    if (p3.mustPickNewForAllFive && !p3.matchStyles.includes(styleKey)) {
-      return {
-        allowed: false,
-        reason: `Intense V3 Mode: must explore all 5 combat styles by the end of the match (${p3.matchStyles.length}/5 explored).`,
-      };
-    }
-    return { allowed: true, reason: "" };
-  }
-  return { allowed: true, reason: "" };
+  return getStyleExplorationStatus(player, styleKey, getActiveExplorationMode());
 }
 
 function isCombatStyleAllowed(player, styleKey) {

@@ -1,6 +1,6 @@
 // computerAi.js — Smart Computer Opponent for Vs Computer Mode (Medium: ~80% best choice, Hard: 100% best choice without peeking at opponent card)
 import { getCardTier } from "./cardLoader.js";
-import { getActiveProgressionTier, isBasicStatAllowedInFiveRounds } from "./matchManager.js";
+import { getActiveProgressionTier, isBasicStatAllowedInFiveRounds, getStyleExplorationStatus } from "./matchManager.js";
 
 const STYLES = ["tai", "nin", "gen", "kun", "special"];
 const BASIC_STATS = ["spd", "acc", "dur", "adp"];
@@ -106,7 +106,10 @@ export function chooseComputerMove(matchState, side = "B", difficulty = "hard", 
     const isVc = card.card_id === player.viceCaptainId;
     const leaderMult = isCap ? 1.22 : isVc ? 1.12 : 1.0;
 
-    for (const style of STYLES) {
+    const expMode = matchState?.explorationMode || "default";
+    const allowedStyles = STYLES.filter((st) => getStyleExplorationStatus(player, st, expMode).allowed);
+    const styleCandidates = allowedStyles.length ? allowedStyles : STYLES;
+    for (const style of styleCandidates) {
       const styleSc = scoreCardForStyle(card, style, tierAverages) * leaderMult;
       for (const basicStat of candidateStats) {
         const statSc = scoreBasicStatForCard(card, style, basicStat, tierAverages);

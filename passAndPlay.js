@@ -73,7 +73,137 @@ function restoreMatchState(snap) {
   return { ...rest, explorationMode: rest.explorationMode || snap.explorationMode || getActiveExplorationMode(), preset: MATCH_PRESETS[presetKey], history: [] };
 }
 
+
+const LOCAL_SAVE_KEY = "ntb_v27_saved_match_v1";
+
+function saveLocalMatchSnapshot() {
+  if (!matchState) return;
+  try {
+    if (matchState.status === "FINISHED") {
+      localStorage.removeItem(LOCAL_SAVE_KEY);
+      return;
+    }
+    const snap = {
+      ...snapshotMatchState(),
+      history: Array.isArray(matchState.history) ? matchState.history : [],
+      playMode,
+      aiDifficulty,
+      pickStep: pickStep === "CLASH_REVEAL" ? "P1_PICK" : pickStep,
+      lockedMoveA: pickStep === "P2_PICK" ? lockedMoveA : null,
+      roomCode: isOnline() ? (roomClient.roomCode || $("roomCodeInput")?.value?.trim()?.toUpperCase() || "") : "",
+      roomRole: isOnline() ? (roomClient.role || "") : "",
+      savedAt: Date.now(),
+    };
+    localStorage.setItem(LOCAL_SAVE_KEY, JSON.stringify(snap));
+  } catch (err) {
+    console.warn("[LocalSave] Could not save match:", err);
+  }
+}
+
+function clearLocalMatchSnapshot() {
+  try {
+    localStorage.removeItem(LOCAL_SAVE_KEY);
+  } catch {}
+}
+
+async function tryRestoreLocalMatchOnBoot() {
+  let raw;
+  try {
+    raw = localStorage.getItem(LOCAL_SAVE_KEY);
+  } catch {
+    return false;
+  }
+  if (!raw) return false;
+
+  let snap;
+  try {
+    snap = JSON.parse(raw);
+  } catch {
+    clearLocalMatchSnapshot();
+    return false;
+  }
+  if (!snap || snap.status !== "IN_PROGRESS" || !snap.presetKey || !MATCH_PRESETS[snap.presetKey]) {
+    clearLocalMatchSnapshot();
+    return false;
+  }
+
+  // Expire after 24 hours
+  if (snap.savedAt && Date.now() - snap.savedAt > 24 * 60 * 60 * 1000) {
+    clearLocalMatchSnapshot();
+    return false;
+  }
+
+  const modeLabel =
+    snap.playMode === "online_room"
+      ? `Online Room (${snap.roomCode || "ROOM"})`
+      : snap.playMode === "vs_computer"
+      ? "Vs Computer"
+      : "Pass & Play";
+  const where = `${modeLabel} · Turn ${snap.turn} (${snap.activeTier || "L1"}), ${snap.players?.A?.name ?? "Player 1"} vs ${snap.players?.B?.name ?? "Player 2"}`;
+
+  if (!confirm(`Unfinished match found:
+${where}
+
+OK = Resume Match
+Cancel = Start New Match`)) {
+    clearLocalMatchSnapshot();
+    return false;
+  }
+
+  playMode = snap.playMode || "pass_and_play";
+  aiDifficulty = snap.aiDifficulty || "hard";
+  selectedExplorationMode = snap.explorationMode || "default";
+
+  // Sync setup UI controls to restored mode
+  $("modeBtnGroup")?.querySelectorAll("button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.mode === playMode);
+  });
+  $("onlineRoomPanel")?.classList.toggle("hidden", !isOnline());
+  $("aiSettingsPanel")?.classList.toggle("hidden", !isVsComputer());
+  if ($("poolFilterSelect")) $("poolFilterSelect").value = selectedExplorationMode;
+  if ($("playerAName") && snap.players?.A?.name) $("playerAName").value = snap.players.A.name;
+  if ($("playerBName") && snap.players?.B?.name) $("playerBName").value = snap.players.B.name;
+
+  matchState = restoreMatchState(snap);
+  matchState.history = Array.isArray(snap.history) ? snap.history : [];
+  pickStep = snap.pickStep || "P1_PICK";
+  lockedMoveA = snap.lockedMoveA || null;
+  remoteMoveBuffer = null;
+  myMoveLockedOnline = false;
+  selectedCardId = null;
+
+  showScreen("screenArena");
+  updateHud();
+  renderHistoryLog();
+
+  if (isOnline() && snap.roomCode) {
+    $("roomCodeInput").value = snap.roomCode;
+    try {
+      if (snap.roomRole === "GUEST") {
+        await roomClient.joinRoom(snap.roomCode);
+        updateRoomHeaderBadge();
+        setRoomStatus(`GUEST · Code: ${snap.roomCode}`, true);
+      } else {
+        await roomClient.createRoom(snap.roomCode);
+        updateRoomHeaderBadge();
+        setRoomStatus(`HOST · Code: ${snap.roomCode}`, true);
+        persistOnlineState();
+        if (roomClient.connected) sendResync();
+      }
+    } catch (err) {
+      setRoomStatus("Reconnecting Room...");
+      $("roomLobbyInfo").textContent = err.message;
+    }
+    prepareOnlineTurnUi();
+  } else {
+    prepareTurnCurtain();
+  }
+
+  return true;
+}
+
 function persistOnlineState() {
+  saveLocalMatchSnapshot();
   if (!isOnline() || roomClient.role !== "HOST" || !matchState) return;
   if (matchState.status === "FINISHED") {
     roomClient.clearState?.();
@@ -125,6 +255,7 @@ function handleResync(msg) {
     $("turnCurtainSub").textContent = "Reconnected. Waiting for the clash to resolve...";
   }
   renderHistoryLog();
+  saveLocalMatchSnapshot();
 }
 
 async function offerHostResume() {
@@ -260,6 +391,7 @@ async function initDatabase() {
     const raw = await resp.json();
     db = createCardDatabase(raw);
     tierAverages = computeTierAverages(raw);
+    await tryRestoreLocalMatchOnBoot();
   } catch (err) {
     $("loadError").classList.remove("hidden");
     $("loadError").textContent =
@@ -449,6 +581,7 @@ roomClient.on("message", (msg) => {
     selectedCardId = null;
     showScreen("screenArena");
     updateHud();
+    saveLocalMatchSnapshot();
     prepareOnlineTurnUi();
   } else if (msg.type === "GUEST_MOVE_LOCKED" && roomClient.role === "HOST") {
     if (!matchState || remoteMoveBuffer) return; // duplicate or no match yet
@@ -484,6 +617,7 @@ roomClient.on("message", (msg) => {
 
     myMoveLockedOnline = false;
     selectedCardId = null;
+    saveLocalMatchSnapshot();
     runAnimatedBattleSimulation(rec);
   } else if (msg.type === "RESYNC_STATE" && roomClient.role === "GUEST") {
     handleResync(msg);
@@ -737,6 +871,7 @@ function confirmLeaders() {
     selectedCardId = null;
     showScreen("screenArena");
     updateHud();
+    saveLocalMatchSnapshot();
     prepareTurnCurtain();
     return;
   }
@@ -766,6 +901,7 @@ function confirmLeaders() {
 
   showScreen("screenArena");
   updateHud();
+  saveLocalMatchSnapshot();
   prepareTurnCurtain();
 }
 
@@ -935,6 +1071,8 @@ function handleActivateShield(side) {
   if (isOnline()) {
     roomClient.send({ type: "SHIELD_SYNC", event: ev });
     persistOnlineState();
+  } else {
+    saveLocalMatchSnapshot();
   }
   updateHud();
   renderHistoryLog();
@@ -1538,6 +1676,7 @@ function handleLockMove() {
       moveB: aiMove,
     });
     pickStep = "CLASH_REVEAL";
+    saveLocalMatchSnapshot();
     runAnimatedBattleSimulation(record);
     return;
   }
@@ -1545,6 +1684,7 @@ function handleLockMove() {
   if (pickStep === "P1_PICK") {
     lockedMoveA = chosenMove;
     pickStep = "P2_PICK";
+    saveLocalMatchSnapshot();
     prepareTurnCurtain();
     return;
   }
@@ -1555,12 +1695,14 @@ function handleLockMove() {
   });
 
   pickStep = "CLASH_REVEAL";
+  saveLocalMatchSnapshot();
   runAnimatedBattleSimulation(record);
 }
 
 function advanceTurn() {
   clearAnimTimers();
   if (matchState.status === "FINISHED") {
+    clearLocalMatchSnapshot();
     $("clashRevealPanel").classList.add("hidden");
     $("matchOverPanel").classList.remove("hidden");
     const w = matchState.winner;
@@ -1702,8 +1844,8 @@ $("btnNextTurn").onclick = advanceTurn;
 $("btnReplayAnim").onclick = () => lastClashRecord && runAnimatedBattleSimulation(lastClashRecord);
 $("btnShieldA").onclick = () => handleActivateShield("A");
 $("btnShieldB").onclick = () => handleActivateShield("B");
-$("btnRestartTop").onclick = () => showScreen("screenSetup");
-$("btnPlayAgain").onclick = () => showScreen("screenSetup");
+$("btnRestartTop").onclick = () => { if (confirm("Abandon current match and start a new one?")) { clearLocalMatchSnapshot(); matchState = null; showScreen("screenSetup"); } };
+$("btnPlayAgain").onclick = () => { clearLocalMatchSnapshot(); matchState = null; showScreen("screenSetup"); };
 $("btnToggleSfx").onclick = () => {
   sfxEnabled = !sfxEnabled;
   fxEngine.setSoundEnabled(sfxEnabled);
